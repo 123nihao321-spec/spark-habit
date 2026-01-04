@@ -5,12 +5,9 @@ import {
   Sun, Moon, LayoutGrid, Infinity as InfinityIcon, 
   Smile, Frown, Meh, Heart, Star, MessageSquare,
   ShoppingBag, Settings, Lock, Gift, Coins, User, History, Receipt, RefreshCw,
-  Camera, Edit3, Upload, Palette, Image as ImageIcon, LogOut, RotateCcw
+  Camera, Edit3, Upload, Palette, Image as ImageIcon, LogOut, RotateCcw, Ticket
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
-
-// --- 配置区 ---
-const DEFAULT_ADMIN_PASSWORD = "888"; 
 
 // --- 预设数据 ---
 const MOODS = [
@@ -87,6 +84,14 @@ export default function App() {
   const [adminItemCost, setAdminItemCost] = useState(100);
   const [adminItemIcon, setAdminItemIcon] = useState('🎁');
 
+  // 计算拥有的补签卡数量
+  const myCardsCount = React.useMemo(() => {
+    if (!transactions) return 0;
+    const bought = transactions.filter(t => t.user_id === userId && t.item_name === '补签卡').length;
+    const used = transactions.filter(t => t.user_id === userId && t.item_name === 'used_card').length;
+    return Math.max(0, bought - used);
+  }, [transactions, userId]);
+
   useEffect(() => {
     try {
       localStorage.setItem('spark-habits', JSON.stringify(habits));
@@ -107,9 +112,6 @@ export default function App() {
       if (storeRes.ok) {
         const items = await storeRes.json();
         setStoreItems(items);
-      } else {
-        // 如果 API 不存在（比如因为拖拽上传导致后端丢失），这里就不报错了
-        console.log("Cloud API not found, running in local mode");
       }
       const transRes = await fetch('/api/transact');
       if (transRes.ok) {
@@ -117,7 +119,7 @@ export default function App() {
         setTransactions(trans);
       }
     } catch (e) {
-      // 忽略错误
+      // 忽略本地错误
     } finally {
       setIsLoadingCloud(false);
     }
@@ -189,6 +191,48 @@ export default function App() {
       }
       return h;
     }));
+  };
+
+  const useRetroactiveCard = async (habitId) => {
+    if (myCardsCount <= 0) {
+      showToast('补签卡不足，请去商店兑换！');
+      return;
+    }
+
+    if (window.confirm('确定使用一张补签卡进行补签吗？🎫')) {
+      try {
+        await fetch('/api/transact', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            userId, userName: nickname, userAvatar: avatar, 
+            itemName: 'used_card', itemIcon: '🎫', cost: 0, 
+            date: new Date().toLocaleString()
+          })
+        });
+        fetchCloudData(); 
+      } catch(e) { console.error("API Error"); }
+
+      setHabits(habits.map(h => {
+        if (h.id === habitId) {
+          const newLog = { 
+            date: `补签 ${new Date().toLocaleDateString()}`, 
+            timestamp: Date.now(), 
+            mood: 'neutral', 
+            comment: '使用补签卡' 
+          };
+          if (h.type === 'streak') {
+             return { ...h, streak: h.streak + 1 };
+          } else {
+             return { ...h, logs: [...h.logs, newLog] };
+          }
+        }
+        return h;
+      }));
+
+      showToast('补签成功！✨');
+      triggerConfetti();
+    }
   };
 
   const openGridCheckIn = (id) => {
@@ -293,21 +337,9 @@ export default function App() {
     }
   };
 
-  // 🔥 核心修复：登录逻辑
+  // 🔥 核心修改：移除本地 888 密码，只依赖 API
   const handleAdminLogin = async () => {
     setIsVerifying(true);
-
-    // 1. 优先检查万能密码 888 (在所有情况下都有效，无论是否有后端)
-    if (passwordInput === "888") {
-      setIsAdmin(true);
-      setShowAdminLogin(false);
-      setShowAdminPanel(true);
-      showToast("欢迎回来！(本地模式)");
-      setIsVerifying(false);
-      return;
-    }
-
-    // 2. 尝试云端验证 (仅当输入不是888时尝试)
     try {
       const res = await fetch('/api/verify', {
         method: 'POST',
@@ -315,22 +347,21 @@ export default function App() {
         body: JSON.stringify({ password: passwordInput })
       });
       
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success) {
-          setIsAdmin(true);
-          setShowAdminLogin(false);
-          setShowAdminPanel(true);
-          showToast("验证成功！🔐");
-        } else {
-          showToast("密码错误 🚫");
-        }
+      // 不管是 200 还是 401，我们先解析 JSON
+      const data = await res.json();
+      
+      if (res.ok && data.success) {
+        setIsAdmin(true);
+        setShowAdminLogin(false);
+        setShowAdminPanel(true);
+        showToast("验证成功！🔐");
       } else {
-        // 如果 API 返回 404 (后端未连接)，提示用户
-        showToast("密码错误 🚫 (或服务未连接)");
+        showToast("密码错误 🚫");
+        setPasswordInput("");
       }
     } catch (e) {
-       showToast("请使用密码 888 登录");
+       // 如果 fetch 失败（例如断网或后端未部署），提示用户
+       showToast("无法连接服务器，请检查网络或部署状态");
     } finally {
       setIsVerifying(false);
     }
@@ -417,8 +448,9 @@ export default function App() {
             <span className="font-bold text-sm">{points}</span>
           </div>
           
-          {/* 背景设置区 */}
+          {/* 🔥 修复：背景图片设置区域 */}
           <div className="flex items-center gap-1">
+            {/* 重置按钮：仅在有背景图时显示 */}
             {bgImage && (
               <button 
                 onClick={() => { setBgImage(''); showToast('背景已恢复默认 ✨'); }} 
@@ -427,6 +459,7 @@ export default function App() {
                 <RotateCcw size={18} className="text-gray-400 hover:text-white" />
               </button>
             )}
+            {/* 上传按钮 */}
             <div className="relative">
               <input type="file" accept="image/*" onChange={handleBgUpload} className="hidden" id="bg-upload" />
               <label htmlFor="bg-upload" className={`flex p-2 rounded-full cursor-pointer transition-colors ${isDark ? 'bg-slate-800/80 hover:bg-slate-700' : 'bg-white/80 hover:bg-gray-100 shadow-sm'}`}>
@@ -466,6 +499,16 @@ export default function App() {
                     <p className={`text-xs ${subTextClass}`}>{habit.type === 'streak' ? `已坚持 ${habit.streak} 天` : `挑战进度: ${habit.logs.length} / ${habit.targetDays}`}</p>
                   </div>
                   <div className="flex gap-2">
+                    {myCardsCount > 0 && !isGridTodayDone && !habit.completedToday && (
+                      <button 
+                        onClick={() => useRetroactiveCard(habit.id)}
+                        className="flex items-center justify-center p-2 rounded-xl bg-orange-100 text-orange-500 hover:bg-orange-200 transition-colors"
+                        title="使用补签卡"
+                      >
+                        <Ticket size={18} />
+                      </button>
+                    )}
+
                     <button onClick={() => requestDeleteHabit(habit.id)} className={`p-2 rounded-xl transition-colors ${isDark ? 'hover:bg-slate-700 text-slate-500' : 'hover:bg-gray-100 text-gray-400'}`}><Trash2 size={18} /></button>
                     
                     {habit.type === 'streak' ? (
@@ -592,11 +635,6 @@ export default function App() {
              <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowProfileModal(false)} />
              <motion.div initial={{ scale: 0.9 }} animate={{ scale: 1 }} exit={{ scale: 0.9, y: 20 }} className={`relative w-full max-w-sm ${isDark ? 'bg-slate-800' : 'bg-white'} rounded-3xl p-6 shadow-2xl overflow-hidden`}>
                 <h3 className="text-xl font-bold mb-6 text-center">个人资料</h3>
-                {bgImage && (
-                  <button onClick={() => { setBgImage(''); showToast('壁纸已还原'); }} className="absolute top-4 right-4 text-gray-400 hover:text-red-400">
-                    <RotateCcw size={18} />
-                  </button>
-                )}
                 <div className="flex flex-col items-center mb-6">
                    <AvatarDisplay src={editAvatar} size="lg" className="mb-3 ring-4 ring-purple-500/30" />
                    <div className="w-full">
@@ -654,7 +692,10 @@ export default function App() {
               <div className="flex justify-between items-center mb-6">
                 <div>
                    <h2 className="text-xl font-bold flex items-center gap-2"><ShoppingBag className="text-pink-400" /> 积分商店</h2>
-                   <p className={`text-xs ${subTextClass} mt-1`}>您的积分: <span className="text-yellow-400 font-bold">{points}</span></p>
+                   <div className="flex gap-2 items-center">
+                     <p className={`text-xs ${subTextClass} mt-1`}>您的积分: <span className="text-yellow-400 font-bold">{points}</span></p>
+                     <p className={`text-xs ${subTextClass} mt-1 border-l pl-2 ml-2 border-gray-600`}>补签卡: <span className="text-orange-400 font-bold">{myCardsCount}</span></p>
+                   </div>
                 </div>
                 <div className="flex gap-2">
                    <button onClick={fetchCloudData} className={`p-2 rounded-full ${isDark ? 'bg-slate-700' : 'bg-gray-100'}`}><RefreshCw size={18} className={isLoadingCloud ? "animate-spin" : ""} /></button>
